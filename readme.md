@@ -1,4 +1,11 @@
+## Updates:
+
+❗️❗️[2025-10-13] A simulation-related issue has been [corrected](https://github.com/urgent-challenge/urgent2026_challenge_track1/commit/38a8ebac16ed8a0aa7b06c89fe40a5d72c65689a) in the baseline code. We strongly recommend pulling the latest version to ensure proper dynamic simulation behavior.
+
+⚠️ Please note: When simulating Vorbis codec distortion, the `qscale` parameter is officially supported in the range [-1, 10], as documented in the [FFmpeg Theora/Vorbis Encoding Guide](https://trac.ffmpeg.org/wiki/TheoraVorbisEncodingGuide). However, in some versions of `torchaudio`, setting `qscale=0` when using the Vorbis encoder may result in completely silent output. We advise verifying your encoder behavior and avoiding `qscale=0` unless explicitly tested.
+
 ## How to run:
+
 
 
 ### Setup:
