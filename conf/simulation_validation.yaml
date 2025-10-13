@@ -54,7 +54,7 @@ augmentations:
         qscale: [1, 10]
       - format: ogg
         encoder: [vorbis, ]
-        qscale: [-1, 10]
+        qscale: [1, 10]
   packet_loss:
     weight: 1.0
     packet_duration_ms: 20

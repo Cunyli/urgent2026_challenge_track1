@@ -64,7 +64,7 @@ class SimulationConfigs:
             weight=1.0,
             config=[
                 dict(format='mp3', encoder=None, qscale=[1, 10]),
-                dict(format='ogg', encoder=['vorbis'], qscale=[-1, 10]),
+                dict(format='ogg', encoder=['vorbis'], qscale=[1, 10]),
             ]
         ),
         packet_loss=dict(
