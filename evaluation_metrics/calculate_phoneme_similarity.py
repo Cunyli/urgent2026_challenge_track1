@@ -26,17 +26,17 @@ class PhonemePredictor(Module):
     ):
         # https://huggingface.co/facebook/wav2vec2-lv-60-espeak-cv-ft
         super().__init__()
-        self.processor = Wav2Vec2Processor.from_pretrained(checkpoint)
-        self.model = Wav2Vec2ForCTC.from_pretrained(checkpoint).to(device=device)
+        self.processor = Wav2Vec2Processor.from_pretrained(checkpoint, device=device)
+        self.model = Wav2Vec2ForCTC.from_pretrained(checkpoint).to(device)
         self.sr = sr
         self.device = device
 
     def forward(self, waveform):
-        input_values = self.processor(
-            waveform, return_tensors="pt", sampling_rate=self.sr
-        ).input_values
+        input_values = self.processor(waveform, return_tensors="pt", sampling_rate=self.sr).input_values
+        if len(input_values.shape) == 3:
+            input_values = input_values.squeeze(0)
         # retrieve logits
-        logits = self.model(input_values.to(device=self.device)).logits
+        logits = self.model(input_values.to(self.device)).logits
 
         # take argmax and decode
         predicted_ids = torch.argmax(logits, dim=-1)
@@ -44,26 +44,27 @@ class PhonemePredictor(Module):
 
 
 class LevenshteinPhonemeSimilarity:
-    """Levenshtein Phoneme Similarity.
-
-    Reference:
-        J. Pirklbauer, M. Sach, K. Fluyt, W. Tirry, W. Wardah, S. Moeller,
-        and T. Fingscheidt, “Evaluation metrics for generative speech enhancement
-        methods: Issues and perspectives,” in Speech Communication; 15th ITG Conference,
-        2023, pp. 265-269.
-        https://ieeexplore.ieee.org/document/10363040
-    """
-
-    def __init__(self, device="cpu"):
+    def __init__(self, device="cpu", reduce="mean"):
         self.phoneme_predictor = PhonemePredictor(device=device)
+        self.reduce = reduce
 
     def __call__(self, reference: np.ndarray, sample: np.ndarray) -> float:
-        sample_phonemes = self.phoneme_predictor(sample)[0].replace(" ", "")
-        ref_phonemes = self.phoneme_predictor(reference)[0].replace(" ", "")
-        if len(ref_phonemes) == 0:
-            return np.nan
-        lev_distance = distance(sample_phonemes, ref_phonemes)
-        return 1 - lev_distance / len(ref_phonemes)
+        sample_phonems = [r.split(" ") for r in self.phoneme_predictor.forward(sample)]
+        ref_phonems = [r.split(" ") for r in self.phoneme_predictor.forward(reference)]
+        assert len(sample_phonems) == len(ref_phonems), "Sample and reference must have the same number of utterances"
+        lev_distance = [distance(rs, rr) for rs, rr in zip(sample_phonems, ref_phonems)]
+        lps = [1 - ld / len(rr) for ld, rr in zip(lev_distance, ref_phonems)]
+        if len(lps) == 1:
+            return lps[0]
+        elif self.reduce == "mean":
+            return sum(lps) / len(lps)
+        elif self.reduce == "sum":
+            return sum(lps)
+        elif self.reduce == None:
+            return lps
+        else:
+            raise ValueError(f"Unknown reduce method: {self.reduce}.")
+
 
 
 def phoneme_similarity_metric(model, ref, inf, fs=16000):
@@ -102,7 +103,8 @@ def main(args):
     with open(args.inf_scp, "r") as f:
         for line in f:
             uid, audio_path = line.strip().split()
-            data_pairs.append((uid, refs[uid], audio_path))
+            if uid in refs:
+                data_pairs.append((uid, refs[uid], audio_path))
 
     size = len(data_pairs)
     assert 1 <= args.job <= args.nsplits <= size
