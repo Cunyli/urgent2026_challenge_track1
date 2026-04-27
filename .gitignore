@@ -40,3 +40,8 @@ downloads/
 baseline_ckpts/
 urgent_submissions_track1/
 
+
+enhanced/
+eval/
+emotion2vec_base.pt
+checkpoints/
