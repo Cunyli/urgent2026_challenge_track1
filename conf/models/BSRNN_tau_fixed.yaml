@@ -1,0 +1,62 @@
+repo_name: urgent2026_challenge_track1
+experiment: tau_fixed_bsrnn_epoch_components_3s
+dataset_type: use_simulation_fixed
+train_dataset_type: use_simulation_fixed
+valid_dataset_type: use_simulation_fixed
+test_dataset_type: use_simulation_fixed
+
+use_simulation_root: /scratch/work/lil14/USE_simulation
+train_pair_manifest: /scratch/work/lil14/data/TAU/simulated/phone_room/train/paired.csv
+valid_pair_manifest: /scratch/work/lil14/data/TAU/simulated/phone_room/valid/paired.csv
+test_pair_manifest: /scratch/work/lil14/data/TAU/simulated/phone_room/test/paired.csv
+target_sample_rate: 16000
+wav_len: 3
+train_num_per_epoch: 0
+valid_num_per_epoch: 0
+train_random_start: true
+valid_random_start: false
+normalize: true
+
+train_set_path : manifests/tau_fixed/phone_room/train
+train_set_dynamic_mixing : False
+valid_set_path : manifests/tau_fixed/phone_room/valid
+val_check_interval : 1.0
+checkpoint_every_n_epochs: 1
+max_duration: 48000
+use_high_pass : True
+batch_size: 4
+num_worker : 2
+
+device : "cuda"
+num_gpu : 1
+
+learning_rate: 1.e-3
+lr_step_size : 1
+lr_gamma : 0.85
+gradient_clip : 0.5
+weight_decay: 1.e-6
+adam_epsilon : 1.e-8
+num_train_epochs : 120
+valid_pesq_batches: 4
+
+train_version : 0
+train_name : 'bsrnn_tau_fixed_epoch_components_3s'
+log_dir: logs/tau_fixed_epoch_components_3s
+checkpoint_dir: checkpoints/tau_fixed_epoch_components_3s/bsrnn_tau_fixed_epoch_components_3s/version_0/checkpoints
+save_top_k : 1
+resume : False
+seed : 2024
+
+use_wandb: True
+wandb_project: bsrnn
+wandb_entity: null
+wandb_group: tau_fixed_bsrnn_epoch_components_3s
+wandb_run_name: null
+wandb_tags: ["bsrnn", "tau_fixed_bsrnn_epoch_components_3s", "epoch_metrics", "loss_components", "3s", "use_simulation", "fixed", "tau"]
+
+model_type: "discriminative"
+init_from : 'none'
+se_model: bsrnn
+model_configs:
+  num_channel: 196
+  num_layer: 6

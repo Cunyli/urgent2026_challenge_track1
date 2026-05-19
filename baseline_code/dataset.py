@@ -1,11 +1,17 @@
 import torch
+import csv
 import glob
+import json
 import itertools
 import soundfile
+import soxr
 import torchaudio
 import pytorch_lightning
 import os
+import importlib
+import sys
 from collections import defaultdict
+from pathlib import Path
 import numpy as np
 import torchaudio
 from simulation.generate_data_param import process_one_sample as get_simu_meta
@@ -149,6 +155,174 @@ class PreSimulatedDataset(torch.utils.data.Dataset):
         speech_length = audio.shape[1]
 
         return audio, noisy, fs, speech_length
+
+
+class UseSimulationFixedPairDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        use_simulation_root,
+        pair_manifest,
+        wav_len=None,
+        num_per_epoch=0,
+        random_start=False,
+        target_sample_rate=16000,
+        mode="train",
+        normalize=True,
+        seed=0,
+    ):
+        self.use_simulation_root = Path(use_simulation_root).expanduser()
+        self.pair_manifest = Path(pair_manifest).expanduser()
+        self.wav_len = wav_len
+        self.target_sample_rate = target_sample_rate
+        self.mode = mode
+        self.random_start = bool(random_start)
+        self.normalize = bool(normalize)
+        self.seed = int(seed)
+
+        if not self.use_simulation_root.is_dir():
+            raise FileNotFoundError(f"USE_simulation repo not found: {self.use_simulation_root}")
+        root = str(self.use_simulation_root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+
+        self.dataset = None
+        try:
+            module = importlib.import_module("use_simulation_datasets")
+            fixed_pair_cls = getattr(module, "FixedPairDataset")
+            self.dataset = fixed_pair_cls(
+                pair_manifest=self.pair_manifest,
+                wav_len=wav_len,
+                num_per_epoch=num_per_epoch,
+                random_start=random_start,
+                target_sample_rate=target_sample_rate,
+                mode=mode,
+                normalize=normalize,
+                seed=seed,
+            )
+            self.meta = list(getattr(self.dataset, "meta_selected", getattr(self.dataset, "meta", [])))
+        except ImportError as exc:
+            print(
+                "Falling back to local fixed-pair CSV loading because USE_simulation "
+                f"dataset import failed: {exc}"
+            )
+            self.meta = self._load_pair_manifest(self.pair_manifest)
+            num_per_epoch = int(num_per_epoch)
+            if 0 < num_per_epoch < len(self.meta):
+                if mode == "train":
+                    self.meta = random.Random(self.seed).sample(self.meta, num_per_epoch)
+                else:
+                    self.meta = self.meta[:num_per_epoch]
+        if not self.meta:
+            raise ValueError(f"No fixed pairs found in {self.pair_manifest}")
+
+        self.sample_rates = []
+        self.source_lengths = []
+        for item in self.meta:
+            sample_rate = int(target_sample_rate or item.get("sample_rate") or soundfile.info(item["noisy_path"]).samplerate)
+            self.sample_rates.append(sample_rate)
+            if wav_len is not None and float(wav_len) > 0:
+                self.source_lengths.append(int(float(wav_len) * sample_rate))
+            else:
+                noisy_len = soundfile.info(item["noisy_path"]).frames
+                clean_len = soundfile.info(item["clean_path"]).frames
+                self.source_lengths.append(min(noisy_len, clean_len))
+
+    @staticmethod
+    def _load_pair_manifest(path):
+        if path.suffix == ".csv":
+            with path.open(newline="") as f:
+                rows = list(csv.DictReader(f))
+            return [
+                {
+                    "id": row.get("uid") or Path(row["noisy_filepath"]).stem,
+                    "noisy_path": row["noisy_filepath"],
+                    "clean_path": row["clean_filepath"],
+                    "sample_rate": int(row["sample_rate"]) if row.get("sample_rate") else None,
+                }
+                for row in rows
+            ]
+
+        with path.open() as f:
+            rows = json.load(f)
+        if not isinstance(rows, list):
+            raise ValueError(f"{path} must contain a JSON list.")
+        return [
+            {
+                "id": row.get("id") or row.get("uid") or Path(row["noisy_path"]).stem,
+                "noisy_path": row.get("noisy_path") or row.get("noisy_filepath"),
+                "clean_path": row.get("clean_path") or row.get("clean_filepath"),
+                "sample_rate": row.get("sample_rate"),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _read_mono(path, target_sample_rate):
+        audio, sample_rate = soundfile.read(path, always_2d=True, dtype="float32")
+        audio = audio[:, :1].T
+        if target_sample_rate is not None and sample_rate != target_sample_rate:
+            audio = soxr.resample(audio.T, sample_rate, target_sample_rate).T
+            sample_rate = target_sample_rate
+        return audio.astype(np.float32, copy=False), int(sample_rate)
+
+    @staticmethod
+    def _crop_or_pad_pair(noisy, clean, wav_len, sample_rate, random_start, rng):
+        orig_len = min(noisy.shape[1], clean.shape[1])
+        noisy = noisy[:, :orig_len]
+        clean = clean[:, :orig_len]
+        if wav_len is None or float(wav_len) <= 0:
+            return noisy, clean
+        seg_len = int(float(wav_len) * sample_rate)
+        if orig_len > seg_len:
+            start = int(rng.integers(0, orig_len - seg_len + 1)) if random_start else 0
+            noisy = noisy[:, start:start + seg_len]
+            clean = clean[:, start:start + seg_len]
+        elif orig_len < seg_len:
+            pad = seg_len - orig_len
+            noisy = np.pad(noisy, ((0, 0), (0, pad)), constant_values=0)
+            clean = np.pad(clean, ((0, 0), (0, pad)), constant_values=0)
+        return noisy, clean
+
+    @staticmethod
+    def _normalize_pair(noisy, clean):
+        scale = 0.9 / (max(np.max(np.abs(noisy)), np.max(np.abs(clean))) + 1e-12)
+        return noisy * scale, clean * scale
+
+    def get_source_length(self):
+        return self.source_lengths
+
+    def get_srs(self):
+        return self.sample_rates
+
+    def __len__(self):
+        return len(self.dataset) if self.dataset is not None else len(self.meta)
+
+    def __getitem__(self, index):
+        if self.dataset is not None:
+            noisy, clean, info = self.dataset[index]
+        else:
+            info = self.meta[index]
+            noisy, fs = self._read_mono(info["noisy_path"], self.target_sample_rate)
+            clean, clean_fs = self._read_mono(info["clean_path"], self.target_sample_rate)
+            if clean_fs != fs:
+                raise ValueError(f"Sample-rate mismatch after loading pair: {info}")
+            rng_seed = int(np.random.default_rng().integers(0, 2**32 - 1)) if self.mode == "train" else index
+            rng = np.random.default_rng(rng_seed)
+            noisy, clean = self._crop_or_pad_pair(noisy, clean, self.wav_len, fs, self.random_start, rng)
+            if self.normalize:
+                noisy, clean = self._normalize_pair(noisy, clean)
+            info = {**info, "sample_rate": fs}
+        clean = np.asarray(clean, dtype=np.float32)
+        noisy = np.asarray(noisy, dtype=np.float32)
+        if clean.ndim == 1:
+            clean = clean[None, :]
+        if noisy.ndim == 1:
+            noisy = noisy[None, :]
+        speech_length = min(clean.shape[1], noisy.shape[1])
+        clean = clean[:, :speech_length]
+        noisy = noisy[:, :speech_length]
+        fs = int(info.get("sample_rate") or self.sample_rates[index])
+        return clean, noisy, fs, speech_length
 
 
 class DynamicMixingDataset(torch.utils.data.Dataset):
@@ -401,6 +575,17 @@ class GroupedBatchSampler(BatchSampler):
         return total
 
 
+def _audio_to_tensor(audio):
+    if torch.is_tensor(audio):
+        return audio.float()
+    if isinstance(audio, np.ndarray):
+        try:
+            return torch.from_numpy(audio).float()
+        except TypeError:
+            return torch.tensor(audio.tolist(), dtype=torch.float32)
+    return torch.tensor(audio, dtype=torch.float32)
+
+
 def collate_fn(batch):
     """
     处理不同长度的音频，动态进行右侧补零padding
@@ -408,8 +593,8 @@ def collate_fn(batch):
     其中 audio_i 形状为 (1, T_i)
     """
     # 分离音频和采样率
-    speechs = [torch.tensor(item[0]) for item in batch]
-    noisy_speechs = [torch.tensor(item[1]) for item in batch]
+    speechs = [_audio_to_tensor(item[0]) for item in batch]
+    noisy_speechs = [_audio_to_tensor(item[1]) for item in batch]
     srs = [item[2] for item in batch]
     lengths = [item[3] for item in batch]
 
@@ -450,8 +635,12 @@ class AudioDataModule(pytorch_lightning.LightningDataModule):
         self.num_worker = config.num_worker
         self.batch_size = config.batch_size
 
+        train_dataset_type = getattr(config, "train_dataset_type", getattr(config, "dataset_type", None))
+        val_dataset_type = getattr(config, "valid_dataset_type", getattr(config, "val_dataset_type", train_dataset_type))
 
-        if self.config.train_set_dynamic_mixing:
+        if train_dataset_type == "use_simulation_fixed":
+            self.train_dataset = self._build_use_simulation_fixed_dataset("train", mode="train")
+        elif self.config.train_set_dynamic_mixing:
             self.train_dataset = DynamicMixingDataset(
                 speech_source_scp=f'{self.train_dir}/speech_sources.scp',
                 noise_source_scp=f'{self.train_dir}/noise_scoures.scp',
@@ -471,11 +660,43 @@ class AudioDataModule(pytorch_lightning.LightningDataModule):
                 max_duration=config.max_duration,
             )
 
-        self.val_dataset = PreSimulatedDataset(
-            clean_speech=f'{self.valid_dir}/spk1.scp',
-            noisy_speech=f'{self.valid_dir}/wav.scp',
-            utt2fs=f'{self.valid_dir}/utt2fs',
-            speech_length=f'{self.valid_dir}/speech_length.scp'
+        if val_dataset_type == "use_simulation_fixed":
+            self.val_dataset = self._build_use_simulation_fixed_dataset("valid", mode="validation")
+        else:
+            self.val_dataset = PreSimulatedDataset(
+                clean_speech=f'{self.valid_dir}/spk1.scp',
+                noisy_speech=f'{self.valid_dir}/wav.scp',
+                utt2fs=f'{self.valid_dir}/utt2fs',
+                speech_length=f'{self.valid_dir}/speech_length.scp'
+            )
+
+    def _get_split_value(self, split, name, default=None):
+        aliases = [f"{split}_{name}"]
+        if split == "valid":
+            aliases.append(f"val_{name}")
+        for alias in aliases:
+            if hasattr(self.config, alias):
+                return getattr(self.config, alias)
+        return getattr(self.config, name, default)
+
+    def _build_use_simulation_fixed_dataset(self, split, mode):
+        pair_manifest = self._get_split_value(split, "pair_manifest")
+        if pair_manifest is None:
+            raise ValueError(f"{split}_pair_manifest must be set for use_simulation_fixed")
+        target_sample_rate = self._get_split_value(split, "target_sample_rate", getattr(self.config, "target_sample_rate", 16000))
+        wav_len = self._get_split_value(split, "wav_len", getattr(self.config, "wav_len", None))
+        if wav_len is None and getattr(self.config, "max_duration", -1) > 0 and target_sample_rate:
+            wav_len = float(self.config.max_duration) / float(target_sample_rate)
+        return UseSimulationFixedPairDataset(
+            use_simulation_root=getattr(self.config, "use_simulation_root"),
+            pair_manifest=pair_manifest,
+            wav_len=wav_len,
+            num_per_epoch=int(self._get_split_value(split, "num_per_epoch", getattr(self.config, "num_per_epoch", 0))),
+            random_start=bool(self._get_split_value(split, "random_start", mode == "train")),
+            target_sample_rate=target_sample_rate,
+            mode=mode,
+            normalize=bool(self._get_split_value(split, "normalize", getattr(self.config, "normalize", True))),
+            seed=int(self._get_split_value(split, "seed", getattr(self.config, "seed", 0))),
         )
 
 
@@ -486,8 +707,8 @@ class AudioDataModule(pytorch_lightning.LightningDataModule):
 
     
     def train_dataloader(self):
-        rank = torch.distributed.get_rank()
-        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
         self.train_batch_sampler = GroupedBatchSampler(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -500,7 +721,7 @@ class AudioDataModule(pytorch_lightning.LightningDataModule):
             batch_sampler=self.train_batch_sampler,
             num_workers=self.num_worker,
             pin_memory=False,
-            persistent_workers=True,
+            persistent_workers=self.num_worker > 0,
             collate_fn=collate_fn,
         )
     
@@ -512,14 +733,14 @@ class AudioDataModule(pytorch_lightning.LightningDataModule):
             batch_size=self.batch_size,
             rank=0,
             world_size=1,
-            drop_last=True,
+            drop_last=False,
         )
         return DataLoader(
             self.val_dataset,
             batch_sampler=self.val_batch_sampler,
             num_workers=self.num_worker,
             pin_memory=False,
-            persistent_workers=True,
+            persistent_workers=self.num_worker > 0,
             collate_fn=collate_fn,
         )
 
