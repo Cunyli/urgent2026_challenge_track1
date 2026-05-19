@@ -45,3 +45,30 @@ enhanced/
 eval/
 emotion2vec_base.pt
 checkpoints/
+
+# Local agent instructions and generated manifests
+AGENTS.md
+CLAUDE.md
+scripts/AGENTS.md
+manifests/**
+*.scp
+*.tsv
+*.tsb
+tests/.gitkeep
+
+# Shared agent project layout
+.DS_Store
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+logs/**
+wandb/**
+lightning_logs/**
+checkpoints/**
+pretrained/**
+outputs/**
+runs/**
+tmp/**
+conf/generated/**
+docs/**

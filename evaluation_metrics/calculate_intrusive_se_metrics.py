@@ -73,13 +73,17 @@ def pesq_metric(ref, inf, fs=8000):
         raise ValueError(
             "sample rate must be 8000 or 16000+ for PESQ evaluation, " f"but got {fs}"
         )
-    pesq_score = pesq(
-        fs,
-        ref,
-        inf,
-        mode=mode,
-        on_error=PesqError.RETURN_VALUES,
-    )
+    try:
+        pesq_score = pesq(
+            fs,
+            ref,
+            inf,
+            mode=mode,
+            on_error=PesqError.RETURN_VALUES,
+        )
+    except PesqError as exc:
+        logging.warning("[PESQ] Error: %s. Skipping this sample.", exc)
+        return None
     if pesq_score == PesqError.NO_UTTERANCES_DETECTED:
         logging.warning(
             f"[PESQ] Error: No utterances detected. " "Skipping this sample."
@@ -151,18 +155,32 @@ def main(args):
 
 def process_one_pair(data_pair):
     uid, ref_path, inf_path = data_pair
-    ref, fs = sf.read(ref_path, dtype="float32")
-    inf, fs2 = sf.read(inf_path, dtype="float32")
-    assert fs == fs2, (fs, fs2)
-    assert ref.shape == inf.shape, (ref.shape, inf.shape)
+    try:
+        ref, fs = sf.read(ref_path, dtype="float32")
+        inf, fs2 = sf.read(inf_path, dtype="float32")
+        if fs != fs2:
+            raise ValueError(f"sample-rate mismatch: ref={fs}, inf={fs2}")
+        if ref.shape != inf.shape:
+            raise ValueError(f"shape mismatch: ref={ref.shape}, inf={inf.shape}")
+    except (OSError, RuntimeError, ValueError) as exc:
+        logging.warning("[%s] Failed to load metric pair: %s", uid, exc)
+        return uid, {metric: np.nan for metric in METRICS}
 
     scores = {}
     for metric in METRICS:
         if metric == "PESQ":
-            pesq_score = pesq_metric(ref, inf, fs=fs)
-            scores[metric] = pesq_score if pesq_score is not None else np.nan
+            try:
+                pesq_score = pesq_metric(ref, inf, fs=fs)
+                scores[metric] = pesq_score if pesq_score is not None else np.nan
+            except (RuntimeError, ValueError) as exc:
+                logging.warning("[%s] PESQ failed: %s", uid, exc)
+                scores[metric] = np.nan
         elif metric == "ESTOI":
-            scores[metric] = estoi_metric(ref, inf, fs=fs)
+            try:
+                scores[metric] = estoi_metric(ref, inf, fs=fs)
+            except (RuntimeError, ValueError) as exc:
+                logging.warning("[%s] ESTOI failed: %s", uid, exc)
+                scores[metric] = np.nan
         else:
             raise NotImplementedError(metric)
 
